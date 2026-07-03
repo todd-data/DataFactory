@@ -1,0 +1,17 @@
+{
+	"name": "Parameterized_DB",
+	"type": "Microsoft.DataFactory/factories/linkedservices",
+	"properties": {
+		"annotations": [],
+		"type": "AzureSqlDatabase",
+		"typeProperties": {
+			"server": "aidatabaseserver.database.windows.net",
+			"database": "AI_Menu_Intelligence",
+			"encrypt": "mandatory",
+			"trustServerCertificate": false,
+			"authenticationType": "SQL",
+			"userName": "alpha",
+			"encryptedCredential": "ew0KICAiVmVyc2lvbiI6ICIyMDE3LTExLTMwIiwNCiAgIlByb3RlY3Rpb25Nb2RlIjogIktleSIsDQogICJTZWNyZXRDb250ZW50VHlwZSI6ICJQbGFpbnRleHQiLA0KICAiQ3JlZGVudGlhbElkIjogIkRBVEFGQUNUT1JZQEREMjVDMTRDLUI0OUQtNDI5RC04Nzk0LTY0RUI0Q0VFQjJEOF81OGE3ZjdlMy0xNzRhLTRhOGItOTNhZi1hMzMxMzE2ZWYzOTYiDQp9"
+		}
+	}
+}
