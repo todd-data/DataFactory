@@ -1,0 +1,15 @@
+{
+	"name": "adfutilities",
+	"properties": {
+		"trustModeClaimForMi": {
+			"value": "Disabled",
+			"editable": true
+		}
+	},
+	"location": "westus2",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "b5f4350e-8bc2-464c-88c7-a749614e43dd",
+		"tenantId": "71125c67-daae-43f3-8d9d-48cf8fa10bb2"
+	}
+}
