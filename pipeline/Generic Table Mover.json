@@ -1,9 +1,555 @@
 {
 	"name": "Generic Table Mover",
 	"properties": {
+		"activities": [
+			{
+				"name": "Script Constraints ForEachTable",
+				"type": "ForEach",
+				"dependsOn": [],
+				"userProperties": [
+					{
+						"name": "TableName",
+						"value": "@pipeline().parameters.TableArray"
+					}
+				],
+				"typeProperties": {
+					"items": {
+						"value": "@pipeline().parameters.TableArray",
+						"type": "Expression"
+					},
+					"isSequential": true,
+					"activities": [
+						{
+							"name": "Script CreateFK Contraints",
+							"type": "Script",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [
+								{
+									"name": "CreateFKSource",
+									"value": "@{item().destination.table}"
+								}
+							],
+							"linkedServiceName": {
+								"referenceName": "Parameterized_DB",
+								"type": "LinkedServiceReference",
+								"parameters": {
+									"ServerName": {
+										"value": "@pipeline().parameters.DestServerName",
+										"type": "Expression"
+									},
+									"DBName": {
+										"value": "@pipeline().parameters.DestDBName",
+										"type": "Expression"
+									}
+								}
+							},
+							"typeProperties": {
+								"scripts": [
+									{
+										"parameters": [
+											{
+												"name": "Table",
+												"type": "String",
+												"value": {
+													"value": "@item().destination.table",
+													"type": "Expression"
+												},
+												"direction": "Input"
+											},
+											{
+												"name": "Schema",
+												"type": "String",
+												"value": {
+													"value": "@item().destination.Schema",
+													"type": "Expression"
+												},
+												"direction": "Input"
+											},
+											{
+												"name": "CreateFK",
+												"type": "String",
+												"direction": "Output",
+												"size": "8000"
+											}
+										],
+										"type": "Query",
+										"text": "--DECLARE @Table VARCHAR(200) ='operator_profile', @Schema VARCHAR(3) = 'loc'\n--DROP TABLE IF EXISTS #fkConstraints\n\n-- Get foreign keys for table and schema\nSELECT CONSTRAINT_NAME INTO #fkConstraints\nFROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\n\tjoin sys.foreign_keys fk ON fk.name = kcu.CONSTRAINT_NAME\n\tWHERE TABLE_NAME = @Table \n\tand CONSTRAINT_SCHEMA = @Schema\nUNION\n\tSELECT fk.name AS CONSTRAINT_NAME\n\tFROM sys.foreign_keys fk\n\t\tJOIN sys.sysobjects spo on fk.parent_object_id=spo.id\n\t\tJOIN sys.sysobjects sro on fk.referenced_object_id=sro.id\n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON fk.name = kcu.CONSTRAINT_NAME\n\t\tWHERE sro.name = @Table\n\t\tAND kcu.TABLE_SCHEMA = @Schema\n\nIF EXISTS (\tSELECT * FROM #fkConstraints )\nBEGIN\n\n\t-- create string for create foreign key script\n\tDECLARE @CreateFK1 varchar(max)\n\tSET @createFK1 ='-- begin CREATE Foreign Keys ' + CHAR(13)\n\tWHILE (SELECT COUNT(CONSTRAINT_NAME) FROM #fkConstraints c ) > 0\n\tBEGIN\n\t\tSELECT @CreateFK1 = @CreateFK1 +\n\t\t\t'IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + fk.name + ']'') AND parent_object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.name + ']''))' + CHAR(13)\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.Name + ']  WITH '+ CASE WHEN fk.is_not_trusted = 1 THEN  'NOCHECK' ELSE 'CHECK' END + ' ADD  CONSTRAINT [' + fk.name + '] FOREIGN KEY([' + fkpc.name + ']) REFERENCES ['+ OBJECT_SCHEMA_NAME(sro.id)+ '].[' + sro.name + '] ([' + fkrc.name + '])' + CHAR(13)\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.name + '] CHECK CONSTRAINT [' + fk.name + ']' + CHAR(13) \n\t\tFROM sys.foreign_keys fk\n\t\tJOIN sys.sysobjects spo \n\t\t\ton fk.parent_object_id=spo.id\n\t\tJOIN sys.sysobjects sro \n\t\t\ton fk.referenced_object_id=sro.id\n\t\tJOIN sys.foreign_key_columns fkc \n\t\t\ton fk.object_id=fkc.constraint_object_id\n\t\tJOIN sys.all_columns fkpc \n\t\t\ton fkc.parent_object_id=fkpc.object_id and fkc.parent_column_id=fkpc.column_id\n\t\tJOIN sys.all_columns fkrc \n\t\t\ton fkc.referenced_object_id=fkrc.object_id and fkc.referenced_column_id=fkrc.column_id \n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\n\t\t\tON fk.name = kcu.CONSTRAINT_NAME\n\t\tWHERE kcu.TABLE_SCHEMA = @Schema \n\t\tAND fk.name = (SELECT TOP 1 constraint_name FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\n\n\t\tDELETE  #fkConstraints WHERE CONSTRAINT_NAME = (SELECT TOP 1 CONSTRAINT_NAME FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\n\tEND\n\n\tSET @CreateFK = @CreateFK1 \n\t--SELECT @CreateFK1\n\nEND\n\n/*\nIF EXISTS (SELECT * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @Table)\nBEGIN\n\tSELECT CONSTRAINT_NAME \n\tINTO #fkConstraints\n\tFROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\n\tjoin sys.foreign_keys fk\n\t\tON fk.name = kcu.CONSTRAINT_NAME\n\tWHERE TABLE_NAME = @Table and CONSTRAINT_SCHEMA = @Schema\n\n\tDECLARE @CreateFK1 varchar(max)\n\tSET @createFK1 ='-- begin CREATE Foreign Keys ' + CHAR(13)\n\tWHILE (SELECT COUNT(CONSTRAINT_NAME) FROM #fkConstraints c ) > 0\n\tBEGIN\n\t\tSELECT @CreateFK1 = @CreateFK1 +\n\t\t\t'IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + fk.name + ']'') AND parent_object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.name + ']''))' + CHAR(13)\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.Name + ']  WITH CHECK ADD  CONSTRAINT [' + fk.name + '] FOREIGN KEY([' + fkpc.name + ']) REFERENCES ['+ kcu.CONSTRAINT_SCHEMA + '].[' + sro.name + '] ([' + fkrc.name + '])' + CHAR(13)\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + spo.name + '] CHECK CONSTRAINT [' + fk.name + ']' + CHAR(13) --+ CHAR(13)\n\t\tFROM sys.foreign_keys fk\n\t\tJOIN sys.sysobjects spo \n\t\t\ton fk.parent_object_id=spo.id\n\t\tJOIN sys.sysobjects sro \n\t\t\ton fk.referenced_object_id=sro.id\n\t\tJOIN sys.foreign_key_columns fkc \n\t\t\ton fk.object_id=fkc.constraint_object_id\n\t\tJOIN sys.all_columns fkpc \n\t\t\ton fkc.parent_object_id=fkpc.object_id and fkc.parent_column_id=fkpc.column_id\n\t\tJOIN sys.all_columns fkrc \n\t\t\ton fkc.referenced_object_id=fkrc.object_id and fkc.referenced_column_id=fkrc.column_id \n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\n\t\t\tON fk.name = kcu.CONSTRAINT_NAME\n\t\tWHERE kcu.TABLE_SCHEMA = @Schema \n\t\tAND kcu.CONSTRAINT_NAME = (SELECT TOP 1 constraint_name FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\n\n\t\tDELETE  #fkConstraints WHERE CONSTRAINT_NAME = (SELECT TOP 1 CONSTRAINT_NAME FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\n\tEND\n\tSET @CreateFK = @CreateFK1 \nEND\n*/\n"
+									}
+								],
+								"scriptBlockExecutionTimeout": "02:00:00"
+							}
+						},
+						{
+							"name": "Append CreateFK Script",
+							"type": "AppendVariable",
+							"dependsOn": [
+								{
+									"activity": "Script CreateFK Contraints",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "CreateFK",
+								"value": {
+									"value": "@concat('--',item().destination.table,' ',activity('Script CreateFK Contraints').output.outputParameters.CreateFK) ",
+									"type": "Expression"
+								}
+							}
+						},
+						{
+							"name": "Script DropFK Constraints",
+							"type": "Script",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [
+								{
+									"name": "DropFKTable",
+									"value": "@{item().destination.table}"
+								}
+							],
+							"linkedServiceName": {
+								"referenceName": "Parameterized_DB",
+								"type": "LinkedServiceReference",
+								"parameters": {
+									"ServerName": {
+										"value": "@pipeline().parameters.DestServerName",
+										"type": "Expression"
+									},
+									"DBName": {
+										"value": "@pipeline().parameters.DestDBName",
+										"type": "Expression"
+									}
+								}
+							},
+							"typeProperties": {
+								"scripts": [
+									{
+										"parameters": [
+											{
+												"name": "Table",
+												"type": "String",
+												"value": {
+													"value": "@item().destination.table",
+													"type": "Expression"
+												},
+												"direction": "Input"
+											},
+											{
+												"name": "Schema",
+												"type": "String",
+												"value": {
+													"value": "@item().destination.Schema",
+													"type": "Expression"
+												},
+												"direction": "Input"
+											},
+											{
+												"name": "DropFK",
+												"type": "String",
+												"value": "",
+												"direction": "Output",
+												"size": "8000"
+											}
+										],
+										"type": "Query",
+										"text": "-- get list of foreign key constraint names\r\n--DROP TABLE IF EXISTS #fkConstraints\r\nSELECT CONSTRAINT_NAME INTO #fkConstraints\r\nFROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\r\n\tjoin sys.foreign_keys fk ON fk.name = kcu.CONSTRAINT_NAME\r\n\tWHERE TABLE_NAME = @Table \r\n\tand CONSTRAINT_SCHEMA = @Schema\r\nUNION\r\n\tSELECT fk.name AS CONSTRAINT_NAME\r\n\tFROM sys.foreign_keys fk\r\n\t\tJOIN sys.sysobjects spo on fk.parent_object_id=spo.id\r\n\t\tJOIN sys.sysobjects sro on fk.referenced_object_id=sro.id\r\n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON fk.name = kcu.CONSTRAINT_NAME\r\n\t\tWHERE sro.name = @Table\r\n\t\tAND kcu.TABLE_SCHEMA = @Schema\r\n\r\n\r\nIF EXISTS ( SELECT * FROM #fkConstraints )\r\nBEGIN\r\n\r\n\tDECLARE @DropFK1 varchar(max)\r\n\tSET @DropFK1 ='--  begin DROP Foreign Keys ' + CHAR(13)\r\n\tWHILE (SELECT COUNT(CONSTRAINT_NAME) FROM #fkConstraints c ) > 0\r\n\tBEGIN\r\n\t\tSELECT @DropFK1 = @DropFK1 \r\n\t\t\t+ 'IF  EXISTS (SELECT * FROM sys.foreign_keys WHERE object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + fk.name + ']'') AND parent_object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + so.name + ']''))' + CHAR(13)\r\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + so.name  + '] DROP CONSTRAINT [' + fk.name + ']' + CHAR(13) + CHAR(13)\r\n\t\tfrom sys.foreign_keys fk\r\n\t\tINNER JOIN sys.sysobjects so \r\n\t\t\ton fk.parent_object_id=so.id\r\n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\r\n\t\t\tON fk.name = kcu.CONSTRAINT_NAME\r\n\t\tWHERE kcu.TABLE_SCHEMA = @Schema \r\n\t\tAND kcu.CONSTRAINT_NAME = (SELECT TOP 1 constraint_name FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\r\n\r\n\t\tDELETE  #fkConstraints WHERE CONSTRAINT_NAME = (SELECT TOP 1 CONSTRAINT_NAME FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\r\n\tEND\r\n\r\n\tSET @DropFK = @DropFK1 \r\n\r\nEND\r\n\r\n/*\r\nIF EXISTS (SELECT * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @Table)\r\nBEGIN\r\n\tSELECT CONSTRAINT_NAME \r\n\tINTO #fkConstraints\r\n\tFROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\r\n\tjoin sys.foreign_keys fk\r\n\t\tON fk.name = kcu.CONSTRAINT_NAME\r\n\tWHERE TABLE_NAME = @Table and CONSTRAINT_SCHEMA = @Schema\r\n\r\n\tDECLARE @DropFK1 varchar(max)\r\n\tSET @DropFK1 ='--  begin DROP Foreign Keys ' + CHAR(13)\r\n\tWHILE (SELECT COUNT(CONSTRAINT_NAME) FROM #fkConstraints c ) > 0\r\n\tBEGIN\r\n\t\tSELECT @DropFK1 = @DropFK1 \r\n\t\t\t+ 'IF  EXISTS (SELECT * FROM sys.foreign_keys WHERE object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + fk.name + ']'') AND parent_object_id = OBJECT_ID(N''['+ kcu.CONSTRAINT_SCHEMA + '].[' + so.name + ']''))' + CHAR(13)\r\n\t\t\t+ 'ALTER TABLE ['+ kcu.CONSTRAINT_SCHEMA + '].[' + so.name  + '] DROP CONSTRAINT [' + fk.name + ']' + CHAR(13) + CHAR(13)\r\n\t\tfrom sys.foreign_keys fk\r\n\t\tINNER JOIN sys.sysobjects so \r\n\t\t\ton fk.parent_object_id=so.id\r\n\t\tJOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu\r\n\t\t\tON fk.name = kcu.CONSTRAINT_NAME\r\n\t\tWHERE kcu.TABLE_SCHEMA = @Schema \r\n\t\tAND kcu.CONSTRAINT_NAME = (SELECT TOP 1 constraint_name FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\r\n\r\n\t\tDELETE  #fkConstraints WHERE CONSTRAINT_NAME = (SELECT TOP 1 CONSTRAINT_NAME FROM #fkConstraints ORDER BY CONSTRAINT_NAME)\r\n\tEND\r\n\r\n\tSET @DropFK = @DropFK1 \r\nEND\r\n*/"
+									}
+								],
+								"scriptBlockExecutionTimeout": "02:00:00"
+							}
+						},
+						{
+							"name": "Append DropFK Script",
+							"type": "AppendVariable",
+							"dependsOn": [
+								{
+									"activity": "Script DropFK Constraints",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "DropFK",
+								"value": {
+									"value": "@concat('--',item().destination.table,' ',activity('Script DropFK Constraints').output.outputParameters.DropFK)",
+									"type": "Expression"
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Drop FK Constraints",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "Script Constraints ForEachTable",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"linkedServiceName": {
+					"referenceName": "Parameterized_DB",
+					"type": "LinkedServiceReference",
+					"parameters": {
+						"ServerName": {
+							"value": "@pipeline().parameters.DestServerName",
+							"type": "Expression"
+						},
+						"DBName": {
+							"value": "@pipeline().parameters.DestDBName",
+							"type": "Expression"
+						}
+					}
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "Query",
+							"text": {
+								"value": "@join(variables('DropFK'),'')",
+								"type": "Expression"
+							}
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			},
+			{
+				"name": "Transfer Data ForEach Table",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Drop FK Constraints",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@pipeline().parameters.TableArray",
+						"type": "Expression"
+					},
+					"isSequential": false,
+					"activities": [
+						{
+							"name": "Copy tables",
+							"description": "Copies source tables to destination tables",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [
+								{
+									"name": "Source",
+									"value": "@{item().source.table}"
+								},
+								{
+									"name": "Destination",
+									"value": "@{item().destination.table}"
+								}
+							],
+							"typeProperties": {
+								"source": {
+									"type": "AzureSqlSource",
+									"queryTimeout": "02:00:00",
+									"partitionOption": "None"
+								},
+								"sink": {
+									"type": "AzureSqlSink",
+									"preCopyScript": {
+										"value": "@concat('IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''',item().destination.table,''' AND TABLE_SCHEMA = ''',item().destination.Schema,''') TRUNCATE TABLE ',item().destination.Schema,'.',item().destination.table)",
+										"type": "Expression"
+									},
+									"writeBehavior": "insert",
+									"sqlWriterUseTableLock": false,
+									"tableOption": "autoCreate",
+									"disableMetricsCollection": false
+								},
+								"enableStaging": false,
+								"validateDataConsistency": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "db_table_generic",
+									"type": "DatasetReference",
+									"parameters": {
+										"ServerName": {
+											"value": "@pipeline().parameters.SourceServerName",
+											"type": "Expression"
+										},
+										"DBName": {
+											"value": "@pipeline().parameters.SourceDBName",
+											"type": "Expression"
+										},
+										"SchemaName": {
+											"value": "@item().source.Schema",
+											"type": "Expression"
+										},
+										"TableName": {
+											"value": "@item().source.table",
+											"type": "Expression"
+										}
+									}
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "db_table_generic",
+									"type": "DatasetReference",
+									"parameters": {
+										"ServerName": {
+											"value": "@pipeline().parameters.DestServerName",
+											"type": "Expression"
+										},
+										"DBName": {
+											"value": "@pipeline().parameters.DestDBName",
+											"type": "Expression"
+										},
+										"SchemaName": {
+											"value": "@item().destination.Schema",
+											"type": "Expression"
+										},
+										"TableName": {
+											"value": "@item().destination.table",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					]
+				}
+			},
+			{
+				"name": "Create FK Constraints",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "Transfer Data ForEach Table",
+						"dependencyConditions": [
+							"Failed"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [
+					{
+						"name": "createFK",
+						"value": "@join(variables('CreateFK'),'')"
+					}
+				],
+				"linkedServiceName": {
+					"referenceName": "Parameterized_DB",
+					"type": "LinkedServiceReference",
+					"parameters": {
+						"ServerName": {
+							"value": "@pipeline().parameters.DestServerName",
+							"type": "Expression"
+						},
+						"DBName": {
+							"value": "@pipeline().parameters.DestDBName",
+							"type": "Expression"
+						}
+					}
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "Query",
+							"text": {
+								"value": "@join(variables('CreateFK'),'')",
+								"type": "Expression"
+							}
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			},
+			{
+				"name": "Send Failure Email",
+				"type": "ExecutePipeline",
+				"dependsOn": [
+					{
+						"activity": "Create FK Constraints",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"waitOnCompletion": true,
+					"parameters": {
+						"receiver": {
+							"value": "@pipeline().parameters.emailReceiver",
+							"type": "Expression"
+						},
+						"message": {
+							"value": "@pipeline().parameters.ErrorEmailMessage",
+							"type": "Expression"
+						},
+						"pipelineName": {
+							"value": "@pipeline().parameters.PipelineName",
+							"type": "Expression"
+						},
+						"bodyText": {
+							"value": "@pipeline().parameters.ErrorbodyText",
+							"type": "Expression"
+						}
+					}
+				}
+			},
+			{
+				"name": "Create FK Constraints on success",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "Transfer Data ForEach Table",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [
+					{
+						"name": "createFK",
+						"value": "@join(variables('CreateFK'),'')"
+					}
+				],
+				"linkedServiceName": {
+					"referenceName": "Parameterized_DB",
+					"type": "LinkedServiceReference",
+					"parameters": {
+						"ServerName": {
+							"value": "@pipeline().parameters.DestServerName",
+							"type": "Expression"
+						},
+						"DBName": {
+							"value": "@pipeline().parameters.DestDBName",
+							"type": "Expression"
+						}
+					}
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "Query",
+							"text": {
+								"value": "@join(variables('CreateFK'),'')",
+								"type": "Expression"
+							}
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			}
+		],
+		"parameters": {
+			"TableArray": {
+				"type": "Array"
+			},
+			"SourceServerName": {
+				"type": "string"
+			},
+			"SourceDBName": {
+				"type": "string"
+			},
+			"DestServerName": {
+				"type": "string"
+			},
+			"DestDBName": {
+				"type": "string"
+			},
+			"emailReceiver": {
+				"type": "string"
+			},
+			"ErrorEmailMessage": {
+				"type": "string"
+			},
+			"PipelineName": {
+				"type": "string"
+			},
+			"ErrorbodyText": {
+				"type": "string"
+			},
+			"TriggeredBy": {
+				"type": "string"
+			}
+		},
+		"variables": {
+			"CreateFK": {
+				"type": "Array"
+			},
+			"DropFK": {
+				"type": "Array"
+			}
+		},
 		"folder": {
 			"name": "Utilities"
 		},
-		"annotations": []
+		"annotations": [
+			"@pipeline().parameters.TriggeredBy",
+			"Table Mover"
+		]
 	}
 }
